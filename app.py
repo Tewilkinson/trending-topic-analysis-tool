@@ -9,14 +9,19 @@ import os
 # -----------------------------
 # Config
 # -----------------------------
-st.set_page_config(page_title="Agentic Keyword Trend Detector", layout="wide")
-st.title("🔍 Agentic Keyword Trend Detector")
+st.set_page_config(page_title="🔍 AI/Data Keyword Watcher", layout="wide")
+st.title("🚀 Agentic Keyword Trend Analyzer")
 
 openai.api_key = os.getenv("OPENAI_API_KEY")
 pytrends = TrendReq(hl='en-US', tz=360)
 
 # -----------------------------
-# Function: Scrape Daily Trending Keywords from Google Trends
+# Categories we want to classify into
+# -----------------------------
+CATEGORIES = ['AI/ML', 'Data Engineering', 'Analytics']
+
+# -----------------------------
+# Scrape Google Trends Trending Now keywords
 # -----------------------------
 def scrape_trending_keywords_html(geo='US'):
     url = f"https://trends.google.com/trends/trendingsearches/daily?geo={geo}"
@@ -29,76 +34,87 @@ def scrape_trending_keywords_html(geo='US'):
     return [t.text.strip() for t in titles if t.text.strip()]
 
 # -----------------------------
-# Streamlit UI
+# Use GPT to classify keywords into buckets
 # -----------------------------
-industry = st.selectbox("Select Industry Focus", ["AI", "Finance", "Healthcare", "E-commerce", "Education"])
+def classify_keywords(keywords, categories):
+    prompt = f"""
+You are a keyword classifier. Given the list of trending keywords:
 
-if st.button("Auto-Detect Weekly Trends"):
-    with st.spinner("Fetching daily trending keywords..."):
-        try:
-            # Step 1: Scrape trending keywords from HTML
-            trend_list = scrape_trending_keywords_html(geo='US')
+{', '.join(keywords)}
 
-            if not trend_list:
-                st.warning("No trending keywords found.")
-                st.stop()
+Categorize each keyword into one of the following categories if relevant:
+{', '.join(categories)}
 
-            # Step 2: Filter with OpenAI
-            prompt = f"""
-You're an SEO assistant. From this list of trending keywords:
-{', '.join(trend_list)}
-Return only those relevant to the {industry} industry. Just respond with a comma-separated list.
+Respond in the following JSON format:
+{{
+  "AI/ML": [...],
+  "Data Engineering": [...],
+  "Analytics": [...]
+}}
+
+Only include keywords that are clearly relevant to the category. Do not make up keywords.
 """
-            response = openai.ChatCompletion.create(
-                model="gpt-4",
-                messages=[{"role": "user", "content": prompt}]
-            )
-            filtered = response['choices'][0]['message']['content']
-            relevant_keywords = [kw.strip() for kw in filtered.split(',') if kw.strip()]
+    response = openai.ChatCompletion.create(
+        model="gpt-4",
+        messages=[{"role": "user", "content": prompt}]
+    )
+    import json
+    return json.loads(response['choices'][0]['message']['content'])
 
-            if not relevant_keywords:
-                st.warning(f"No relevant keywords found for {industry}.")
-                st.stop()
-            else:
-                st.success(f"✅ {len(relevant_keywords)} relevant keywords found.")
+# -----------------------------
+# Pull Google Trends data + change
+# -----------------------------
+def analyze_trends(keywords):
+    if not keywords:
+        return pd.DataFrame()
+    pytrends.build_payload(keywords, timeframe='now 7-d', geo='US')
+    data = pytrends.interest_over_time()
+    if 'isPartial' in data.columns:
+        data.drop(columns=['isPartial'], inplace=True)
 
-            # Step 3: Pull trend data for filtered terms
-            pytrends.build_payload(relevant_keywords, timeframe='now 7-d', geo='US')
-            trend_data = pytrends.interest_over_time()
-            if 'isPartial' in trend_data.columns:
-                trend_data.drop(columns=['isPartial'], inplace=True)
+    latest = data.iloc[-1]
+    previous = data.iloc[0]
+    summary = pd.DataFrame({
+        'Keyword': latest.index,
+        'This Week': latest.values,
+        'Start of Week': previous.values,
+        'WoW Change (%)': ((latest - previous) / previous.replace(0, 1) * 100).round(1)
+    })
 
-            if trend_data.empty:
-                st.warning("Trend data is unavailable for the selected keywords.")
-                st.stop()
+    def status(change):
+        if change > 20:
+            return '⬆ Rising'
+        elif change < -10:
+            return '↓ Falling'
+        else:
+            return '→ Stable'
 
-            # Step 4: Analyze trend changes
-            latest = trend_data.iloc[-1]
-            previous = trend_data.iloc[0]
-            summary = pd.DataFrame({
-                'Keyword': latest.index,
-                'This Week': latest.values,
-                'Start of Week': previous.values,
-                'WoW Change (%)': ((latest - previous) / previous.replace(0, 1) * 100).round(1)
-            })
+    summary['Status'] = summary['WoW Change (%)'].apply(status)
+    summary.sort_values(by='WoW Change (%)', ascending=False, inplace=True)
+    return summary
 
-            def status(change):
-                if change > 20:
-                    return '⬆ Rising'
-                elif change < -10:
-                    return '↓ Falling'
-                else:
-                    return '→ Stable'
+# -----------------------------
+# Run the tool
+# -----------------------------
+with st.spinner("🔎 Fetching and classifying trends..."):
+    try:
+        # Step 1: Scrape trending now
+        trend_list = scrape_trending_keywords_html()
 
-            summary['Status'] = summary['WoW Change (%)'].apply(status)
-            summary.sort_values(by='WoW Change (%)', ascending=False, inplace=True)
+        # Step 2: Classify into categories
+        classified = classify_keywords(trend_list, CATEGORIES)
 
-            # Step 5: Display
-            st.subheader("📊 Trending Keywords This Week")
-            st.dataframe(summary, use_container_width=True)
+        # Step 3: Display tables per category
+        for cat in CATEGORIES:
+            st.header(f"📂 {cat} Trends")
+            keywords = classified.get(cat, [])
+            if not keywords:
+                st.info(f"No trending keywords found for {cat} this week.")
+                continue
 
-            st.subheader("📈 Interest Over Time")
-            st.line_chart(trend_data)
+            trend_summary = analyze_trends(keywords)
+            st.dataframe(trend_summary, use_container_width=True)
 
-        except Exception as e:
-            st.error(f"Something went wrong: {e}")
+    except Exception as e:
+        st.error(f"❌ Something went wrong: {e}")
+
