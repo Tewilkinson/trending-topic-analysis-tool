@@ -1,43 +1,54 @@
 import streamlit as st
-from pytrends.request import TrendReq
 import openai
 import pandas as pd
+import requests
+import xml.etree.ElementTree as ET
+from pytrends.request import TrendReq
 import os
 
 # -----------------------------
-# Environment Setup
-# -----------------------------
-openai.api_key = os.getenv("OPENAI_API_KEY")
-pytrends = TrendReq(hl='en-US', tz=360)
-
-# -----------------------------
-# Streamlit App
+# Config
 # -----------------------------
 st.set_page_config(page_title="Agentic Keyword Trend Detector", layout="wide")
 st.title("🔍 Agentic Keyword Trend Detector")
 
+openai.api_key = os.getenv("OPENAI_API_KEY")
+pytrends = TrendReq(hl='en-US', tz=360)
+
+# -----------------------------
+# Function: Scrape RSS Trending Searches
+# -----------------------------
+def get_rss_trending_keywords(geo='US'):
+    url = f'https://trends.google.com/trends/trendingsearches/daily/rss?geo={geo}'
+    response = requests.get(url)
+    if response.status_code != 200:
+        raise Exception(f"RSS feed failed with code {response.status_code}")
+    
+    root = ET.fromstring(response.content)
+    items = root.findall('.//item/title')
+    return [item.text for item in items]
+
+# -----------------------------
+# Streamlit UI
+# -----------------------------
 industry = st.selectbox("Select Industry Focus", ["AI", "Finance", "Healthcare", "E-commerce", "Education"])
 
 if st.button("Auto-Detect Weekly Trends"):
-    with st.spinner("Fetching real-time trending keywords..."):
+    with st.spinner("Fetching daily trending keywords..."):
         try:
-            # Step 1: Try trending searches from US, fallback to Global
-            try:
-                trends_now = pytrends.trending_searches(pn='united_states')
-            except:
-                trends_now = pytrends.trending_searches(pn='global')
-            
-            trend_list = trends_now[0].tolist()
+            # Step 1: Scrape trending keywords via RSS
+            trend_list = get_rss_trending_keywords(geo='US')  # or 'GB', 'IN', etc.
+
             if not trend_list:
-                st.warning("No trending searches found.")
+                st.warning("No trending keywords found.")
                 st.stop()
 
-            # Step 2: Use GPT to filter by industry
+            # Step 2: Filter using OpenAI for relevance
             prompt = f"""
-You're a keyword classifier. From the list of trending keywords below:
+You're an SEO assistant. From this list of trending keywords:
 {', '.join(trend_list)}
-Identify only those that are relevant to the {industry} industry. 
-Respond with a concise, comma-separated list.
+Return only those related to the industry: "{industry}".
+Respond with a concise comma-separated list only.
 """
             response = openai.ChatCompletion.create(
                 model="gpt-4",
@@ -47,12 +58,12 @@ Respond with a concise, comma-separated list.
             relevant_keywords = [kw.strip() for kw in filtered.split(',') if kw.strip()]
 
             if not relevant_keywords:
-                st.warning(f"No relevant trending keywords found for {industry}.")
+                st.warning(f"No relevant keywords found for {industry}.")
                 st.stop()
             else:
-                st.success(f"✅ {len(relevant_keywords)} keywords found related to {industry}.")
+                st.success(f"✅ {len(relevant_keywords)} relevant keywords found.")
 
-            # Step 3: Pull Google Trends data for these keywords
+            # Step 3: Fetch trend data
             pytrends.build_payload(relevant_keywords, timeframe='now 7-d', geo='US')
             trend_data = pytrends.interest_over_time()
 
@@ -63,7 +74,7 @@ Respond with a concise, comma-separated list.
                 st.warning("Trend data is unavailable for the selected keywords.")
                 st.stop()
 
-            # Step 4: Compare beginning vs end of week
+            # Step 4: Analyze trend growth
             latest = trend_data.iloc[-1]
             previous = trend_data.iloc[0]
             summary = pd.DataFrame({
@@ -85,7 +96,7 @@ Respond with a concise, comma-separated list.
             summary.sort_values(by='WoW Change (%)', ascending=False, inplace=True)
 
             # Step 5: Display
-            st.subheader("📊 Weekly Trending Keywords")
+            st.subheader("📊 Trending Keywords This Week")
             st.dataframe(summary, use_container_width=True)
 
             st.subheader("📈 Interest Over Time")
