@@ -11,7 +11,7 @@ import json
 # Config
 # -----------------------------
 st.set_page_config(page_title="🔍 AI/Data Keyword Watcher", layout="wide")
-st.title("🚀 Agentic Keyword Trend Analyzer")
+st.title("🚀 Agentic Keyword Trend Dashboard")
 
 client = openai.OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 pytrends = TrendReq(hl='en-US', tz=360)
@@ -19,7 +19,7 @@ pytrends = TrendReq(hl='en-US', tz=360)
 # -----------------------------
 # Categories we want to classify into
 # -----------------------------
-CATEGORIES = ['AI/ML', 'Data Engineering', 'Analytics']
+CATEGORIES = ['AI and Machine Learning', 'Data Engineering', 'Data Science and Analytics']
 
 # -----------------------------
 # Scrape Google Trends Trending Now keywords
@@ -48,9 +48,9 @@ Categorize each keyword into one of the following categories if relevant:
 
 Respond in the following JSON format:
 {{
-  "AI/ML": [...],
+  "AI and Machine Learning": [...],
   "Data Engineering": [...],
-  "Analytics": [...]
+  "Data Science and Analytics": [...]
 }}
 
 Only include keywords that are clearly relevant to the category. Do not make up keywords.
@@ -62,58 +62,36 @@ Only include keywords that are clearly relevant to the category. Do not make up 
     return json.loads(response.choices[0].message.content)
 
 # -----------------------------
-# Pull Google Trends data + change
+# Get search volume from pytrends
 # -----------------------------
-def analyze_trends(keywords):
-    if not keywords:
-        return pd.DataFrame()
+def fetch_search_volume(keywords):
     pytrends.build_payload(keywords, timeframe='now 7-d', geo='US')
     data = pytrends.interest_over_time()
     if 'isPartial' in data.columns:
         data.drop(columns=['isPartial'], inplace=True)
-
-    latest = data.iloc[-1]
-    previous = data.iloc[0]
-    summary = pd.DataFrame({
-        'Keyword': latest.index,
-        'This Week': latest.values,
-        'Start of Week': previous.values,
-        'WoW Change (%)': ((latest - previous) / previous.replace(0, 1) * 100).round(1)
-    })
-
-    def status(change):
-        if change > 20:
-            return '⬆ Rising'
-        elif change < -10:
-            return '↓ Falling'
-        else:
-            return '→ Stable'
-
-    summary['Status'] = summary['WoW Change (%)'].apply(status)
-    summary.sort_values(by='WoW Change (%)', ascending=False, inplace=True)
-    return summary
+    latest = data.iloc[-1] if not data.empty else pd.Series([0]*len(keywords), index=keywords)
+    return latest.to_dict()
 
 # -----------------------------
-# Run the tool
+# Display tables with search volume
 # -----------------------------
-with st.spinner("🔎 Fetching and classifying trends..."):
+with st.spinner("🔎 Fetching and categorizing trending keywords..."):
     try:
-        # Step 1: Scrape trending now
         trend_list = scrape_trending_keywords_html()
-
-        # Step 2: Classify into categories
         classified = classify_keywords(trend_list, CATEGORIES)
 
-        # Step 3: Display tables per category
-        for cat in CATEGORIES:
-            st.header(f"📂 {cat} Trends")
-            keywords = classified.get(cat, [])
+        for category in CATEGORIES:
+            keywords = classified.get(category, [])
+            st.subheader(f"📂 {category}")
             if not keywords:
-                st.info(f"No trending keywords found for {cat} this week.")
-                continue
-
-            trend_summary = analyze_trends(keywords)
-            st.dataframe(trend_summary, use_container_width=True)
+                st.info("No relevant keywords found.")
+            else:
+                volumes = fetch_search_volume(keywords)
+                df = pd.DataFrame({
+                    "Trending Keywords": keywords,
+                    "Search Volume Score (US)": [volumes.get(kw, 0) for kw in keywords]
+                }).sort_values(by="Search Volume Score (US)", ascending=False)
+                st.table(df)
 
     except Exception as e:
         st.error(f"❌ Something went wrong: {e}")
