@@ -5,6 +5,7 @@ import requests
 from bs4 import BeautifulSoup
 from pytrends.request import TrendReq
 import os
+import json
 
 # -----------------------------
 # Config
@@ -12,7 +13,7 @@ import os
 st.set_page_config(page_title="🔍 AI/Data Keyword Watcher", layout="wide")
 st.title("🚀 Agentic Keyword Trend Analyzer")
 
-openai.api_key = os.getenv("OPENAI_API_KEY")
+client = openai.OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 pytrends = TrendReq(hl='en-US', tz=360)
 
 # -----------------------------
@@ -54,12 +55,11 @@ Respond in the following JSON format:
 
 Only include keywords that are clearly relevant to the category. Do not make up keywords.
 """
-    response = openai.ChatCompletion.create(
+    response = client.chat.completions.create(
         model="gpt-4",
         messages=[{"role": "user", "content": prompt}]
     )
-    import json
-    return json.loads(response['choices'][0]['message']['content'])
+    return json.loads(response.choices[0].message.content)
 
 # -----------------------------
 # Pull Google Trends data + change
@@ -117,4 +117,3 @@ with st.spinner("🔎 Fetching and classifying trends..."):
 
     except Exception as e:
         st.error(f"❌ Something went wrong: {e}")
-
