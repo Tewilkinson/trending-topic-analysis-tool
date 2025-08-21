@@ -1,97 +1,147 @@
+# trending_dashboard.py
 import streamlit as st
-import openai
-import pandas as pd
 import requests
 from bs4 import BeautifulSoup
-from pytrends.request import TrendReq
+import pandas as pd
+from datetime import datetime, timedelta
 import os
-import json
+import openai
+import pickle
 
 # -----------------------------
 # Config
 # -----------------------------
-st.set_page_config(page_title="🔍 AI/Data Keyword Watcher", layout="wide")
-st.title("🚀 Agentic Keyword Trend Dashboard")
+openai.api_key = os.getenv("OPENAI_API_KEY")  # Set in your .env
 
-client = openai.OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-pytrends = TrendReq(hl='en-US', tz=360)
+CATEGORIES = ["AI/ML"]  # Start with AI/ML only
+CACHE_FILE = "topic_cache.pkl"  # Cache OpenAI classifications
 
-# -----------------------------
-# Categories we want to classify into
-# -----------------------------
-CATEGORIES = ['AI and Machine Learning', 'Data Engineering', 'Data Science and Analytics']
-
-# -----------------------------
-# Scrape Google Trends Trending Now keywords
-# -----------------------------
-def scrape_trending_keywords_html(geo='US'):
-    url = f"https://trends.google.com/trends/trendingsearches/daily?geo={geo}"
-    headers = {"User-Agent": "Mozilla/5.0"}
-    r = requests.get(url, headers=headers)
-    if r.status_code != 200:
-        raise Exception(f"Trending page returned {r.status_code}")
-    soup = BeautifulSoup(r.text, "html.parser")
-    titles = soup.select("div.feed-item h2 a")
-    return [t.text.strip() for t in titles if t.text.strip()]
+RSS_FEEDS = {
+    "daily": "https://trends.google.com/trends/trendingsearches/daily/rss?geo=US",
+    "realtime": "https://trends.google.com/trends/trendingsearches/realtime/rss?geo=US"
+}
 
 # -----------------------------
-# Use GPT to classify keywords into buckets
+# Load or initialize OpenAI cache
 # -----------------------------
-def classify_keywords(keywords, categories):
+if os.path.exists(CACHE_FILE):
+    with open(CACHE_FILE, "rb") as f:
+        topic_cache = pickle.load(f)
+else:
+    topic_cache = {}
+
+# -----------------------------
+# Helper Functions
+# -----------------------------
+def fetch_rss(url):
+    """Fetch RSS feed and return list of items"""
+    resp = requests.get(url)
+    soup = BeautifulSoup(resp.content, 'xml')
+    items = []
+    for item in soup.find_all('item'):
+        title = item.title.text
+        pub_date = datetime.strptime(item.pubDate.text, "%a, %d %b %Y %H:%M:%S %Z")
+        traffic = item.find('ht:approx_traffic').text if item.find('ht:approx_traffic') else "N/A"
+        items.append({"topic": title, "published_at": pub_date, "traffic": traffic})
+    return items
+
+def categorize_topic_openai(topic):
+    """Use OpenAI to classify topic into categories"""
+    if topic in topic_cache:
+        return topic_cache[topic]
+
     prompt = f"""
-You are a keyword classifier. Given the list of trending keywords:
-
-{', '.join(keywords)}
-
-Categorize each keyword into one of the following categories if relevant:
-{', '.join(categories)}
-
-Respond in the following JSON format:
-{{
-  "AI and Machine Learning": [...],
-  "Data Engineering": [...],
-  "Data Science and Analytics": [...]
-}}
-
-Only include keywords that are clearly relevant to the category. Do not make up keywords.
+You are an expert in technology and AI. Categorize this topic into one of these categories: ['AI/ML', 'Other']. 
+Only return the category. Ignore irrelevant topics.
+Topic: "{topic}"
 """
-    response = client.chat.completions.create(
-        model="gpt-4",
-        messages=[{"role": "user", "content": prompt}]
-    )
-    return json.loads(response.choices[0].message.content)
-
-# -----------------------------
-# Get search volume from pytrends
-# -----------------------------
-def fetch_search_volume(keywords):
-    pytrends.build_payload(keywords, timeframe='now 7-d', geo='US')
-    data = pytrends.interest_over_time()
-    if 'isPartial' in data.columns:
-        data.drop(columns=['isPartial'], inplace=True)
-    latest = data.iloc[-1] if not data.empty else pd.Series([0]*len(keywords), index=keywords)
-    return latest.to_dict()
-
-# -----------------------------
-# Display tables with search volume
-# -----------------------------
-with st.spinner("🔎 Fetching and categorizing trending keywords..."):
     try:
-        trend_list = scrape_trending_keywords_html()
-        classified = classify_keywords(trend_list, CATEGORIES)
-
-        for category in CATEGORIES:
-            keywords = classified.get(category, [])
-            st.subheader(f"📂 {category}")
-            if not keywords:
-                st.info("No relevant keywords found.")
-            else:
-                volumes = fetch_search_volume(keywords)
-                df = pd.DataFrame({
-                    "Trending Keywords": keywords,
-                    "Search Volume Score (US)": [volumes.get(kw, 0) for kw in keywords]
-                }).sort_values(by="Search Volume Score (US)", ascending=False)
-                st.table(df)
-
+        response = openai.ChatCompletion.create(
+            model="gpt-4",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0
+        )
+        category = response['choices'][0]['message']['content'].strip()
     except Exception as e:
-        st.error(f"❌ Something went wrong: {e}")
+        print(f"OpenAI API error for topic '{topic}': {e}")
+        category = "Other"
+
+    # Only keep relevant categories
+    if category not in CATEGORIES:
+        category = None
+
+    topic_cache[topic] = category
+    with open(CACHE_FILE, "wb") as f:
+        pickle.dump(topic_cache, f)
+
+    return category
+
+def load_trends():
+    """Fetch and categorize trends from all feeds"""
+    all_items = []
+    for feed_name, feed_url in RSS_FEEDS.items():
+        items = fetch_rss(feed_url)
+        for item in items:
+            category = categorize_topic_openai(item['topic'])
+            if category:
+                item['category'] = category
+                all_items.append(item)
+    df = pd.DataFrame(all_items)
+    if not df.empty:
+        df = df.drop_duplicates(subset=['topic', 'published_at'])
+        df['published_at'] = pd.to_datetime(df['published_at'])
+    return df
+
+def filter_time_period(df, period="24h"):
+    now = datetime.utcnow()
+    if period == "24h":
+        return df[df['published_at'] >= now - timedelta(hours=24)]
+    elif period == "48h":
+        return df[df['published_at'] >= now - timedelta(hours=48)]
+    elif period == "7d":
+        return df[df['published_at'] >= now - timedelta(days=7)]
+    else:
+        return df
+
+# -----------------------------
+# Streamlit UI
+# -----------------------------
+st.set_page_config(page_title="Google Trending Now Dashboard", layout="wide")
+st.title("Google Trending Now - AI/ML Dashboard")
+
+# Sidebar
+time_period = st.sidebar.selectbox("Time Period", ["24h", "48h", "7d"])
+category_filter = st.sidebar.selectbox("Category", CATEGORIES)
+
+st.sidebar.markdown("---")
+st.sidebar.markdown("This dashboard fetches trending topics from Google Trends RSS feeds and categorizes them into AI/ML using OpenAI GPT.")
+
+# Fetch and process trends
+with st.spinner("Fetching trending topics..."):
+    df_trends = load_trends()
+
+if df_trends.empty:
+    st.warning("No trending topics found.")
+else:
+    # Filter
+    df_filtered = df_trends[df_trends['category'] == category_filter]
+    df_filtered = filter_time_period(df_filtered, time_period)
+
+    if df_filtered.empty:
+        st.info(f"No {category_filter} topics found in the last {time_period}.")
+    else:
+        # Display table
+        st.subheader(f"Trending {category_filter} Topics - Last {time_period}")
+        st.dataframe(df_filtered[['topic', 'traffic', 'published_at', 'category']].sort_values(by='published_at', ascending=False))
+
+        # Display bar chart by traffic
+        st.subheader("Top Trends by Search Volume")
+        # Convert traffic to numeric if possible
+        def parse_traffic(val):
+            try:
+                return int(val.replace(',', '').replace('+', ''))
+            except:
+                return 0
+        df_filtered['traffic_numeric'] = df_filtered['traffic'].apply(parse_traffic)
+        top_trends = df_filtered.groupby('topic')['traffic_numeric'].max().sort_values(ascending=False)
+        st.bar_chart(top_trends)
